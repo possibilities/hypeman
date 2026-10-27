@@ -11,7 +11,7 @@ permissions:
 jobs:
   verify:
     if: github.repository == 'possibilities/hypeman'
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     env:
       UPSTREAM_REVISION: 567335f2effa35c9bea6721767b2960ae6609d20
