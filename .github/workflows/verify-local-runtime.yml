@@ -15,10 +15,12 @@ jobs:
     timeout-minutes: 30
     env:
       UPSTREAM_REVISION: 567335f2effa35c9bea6721767b2960ae6609d20
-      EVIDENCE_DIR: ${{ runner.temp }}/hypeman-evidence
-      PACKAGE_DIR: ${{ runner.temp }}/hypeman-package
-      ARCHIVE_PATH: ${{ runner.temp }}/hypeman-source-567335f2effa-darwin_arm64.tar.gz
     steps:
+      - name: Configure temporary build paths
+        run: |
+          echo "EVIDENCE_DIR=$RUNNER_TEMP/hypeman-evidence" >> "$GITHUB_ENV"
+          echo "PACKAGE_DIR=$RUNNER_TEMP/hypeman-package" >> "$GITHUB_ENV"
+          echo "ARCHIVE_PATH=$RUNNER_TEMP/hypeman-source-567335f2effa-darwin_arm64.tar.gz" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
