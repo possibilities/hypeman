@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   deploy:
+    if: github.repository == 'kernel/hypeman'
     runs-on: ubuntu-latest
     steps:
       - name: Mint token for infra

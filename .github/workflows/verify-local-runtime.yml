@@ -1,0 +1,87 @@
+name: Verify local macOS runtime
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.repository == 'possibilities/hypeman'
+    runs-on: macos-14
+    timeout-minutes: 30
+    env:
+      UPSTREAM_REVISION: 567335f2effa35c9bea6721767b2960ae6609d20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Verify source and build test dependencies
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          git merge-base --is-ancestor "$UPSTREAM_REVISION" HEAD
+          git diff --exit-code "$UPSTREAM_REVISION" HEAD -- . ':(exclude).github'
+          mkdir -p evidence
+          make build-embedded build-vz-shim
+      - name: Prove old keep-alive behavior retains control connections
+        run: |
+          set -euo pipefail
+          trap 'git restore lib/hypervisor/vz/client.go' EXIT
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('lib/hypervisor/vz/client.go')
+          source = p.read_text()
+          line = '\t\tDisableKeepAlives: true,\n'
+          assert source.count(line) == 1
+          p.write_text(source.replace(line, ''))
+          PY
+          set +e
+          go test -race -count=1 -v -tags containers_image_openpgp \
+            -run '^TestRepeatedClientsReleaseSuccessfulControlConnections$' \
+            ./lib/hypervisor/vz > evidence/negative-control.log 2>&1
+          result=$?
+          set -e
+          cat evidence/negative-control.log
+          test "$result" -ne 0
+          grep -Eq 'temporary VZ server retained [1-9][0-9]* connection\(s\)' evidence/negative-control.log
+          grep -q -- '--- FAIL: TestRepeatedClientsReleaseSuccessfulControlConnections' evidence/negative-control.log
+      - name: Verify upstream socket lifecycle and package
+        run: |
+          set -euo pipefail
+          git diff --exit-code -- lib/hypervisor/vz/client.go
+          go test -race -count=10 -v -tags containers_image_openpgp \
+            -run '^(TestRepeatedClientsReleaseSuccessfulControlConnections|TestControlConnectionsCloseAfterResponseErrors|TestControlConnectionClosesAfterCancellation)$' \
+            ./lib/hypervisor/vz | tee evidence/fixed.log
+          go test -race -count=1 -tags containers_image_openpgp ./lib/hypervisor/vz | tee evidence/vz-package.log
+          go vet -tags containers_image_openpgp ./lib/hypervisor/vz ./cmd/vz-shim
+          go test -tags containers_image_openpgp -run '^$' ./cmd/vz-shim
+      - name: Build candidate without launching a server or VM
+        run: |
+          set -euo pipefail
+          make build-darwin
+          git diff --exit-code
+          go version -m bin/hypeman > evidence/build-info.txt
+          shasum -a 256 bin/hypeman > evidence/SHA256SUMS
+          printf 'Source commit: %s\nUpstream revision: %s\nLocal delta: fork CI only; application source unchanged\nNot installed or deployed by this workflow.\n' \
+            "$GITHUB_SHA" "$UPSTREAM_REVISION" > evidence/provenance.txt
+      - name: Upload verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-runtime-evidence
+          path: evidence/
+          retention-days: 14
+      - name: Upload verified candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: hypeman-latest-darwin-arm64
+          path: bin/hypeman
+          retention-days: 14
