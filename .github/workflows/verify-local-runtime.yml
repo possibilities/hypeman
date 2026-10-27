@@ -15,6 +15,9 @@ jobs:
     timeout-minutes: 30
     env:
       UPSTREAM_REVISION: 567335f2effa35c9bea6721767b2960ae6609d20
+      EVIDENCE_DIR: ${{ runner.temp }}/hypeman-evidence
+      PACKAGE_DIR: ${{ runner.temp }}/hypeman-package
+      ARCHIVE_PATH: ${{ runner.temp }}/hypeman-source-567335f2effa-darwin_arm64.tar.gz
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,7 +32,7 @@ jobs:
           test "$(uname -m)" = arm64
           git merge-base --is-ancestor "$UPSTREAM_REVISION" HEAD
           git diff --exit-code "$UPSTREAM_REVISION" HEAD -- . ':(exclude).github'
-          mkdir -p evidence
+          mkdir -p "$EVIDENCE_DIR"
           make build-embedded build-vz-shim
       - name: Prove old keep-alive behavior retains control connections
         run: |
@@ -46,42 +49,61 @@ jobs:
           set +e
           go test -race -count=1 -v -tags containers_image_openpgp \
             -run '^TestRepeatedClientsReleaseSuccessfulControlConnections$' \
-            ./lib/hypervisor/vz > evidence/negative-control.log 2>&1
+            ./lib/hypervisor/vz > "$EVIDENCE_DIR/negative-control.log" 2>&1
           result=$?
           set -e
-          cat evidence/negative-control.log
+          cat "$EVIDENCE_DIR/negative-control.log"
           test "$result" -ne 0
-          grep -Eq 'temporary VZ server retained [1-9][0-9]* connection\(s\)' evidence/negative-control.log
-          grep -q -- '--- FAIL: TestRepeatedClientsReleaseSuccessfulControlConnections' evidence/negative-control.log
+          grep -Eq 'temporary VZ server retained [1-9][0-9]* connection\(s\)' "$EVIDENCE_DIR/negative-control.log"
+          grep -q -- '--- FAIL: TestRepeatedClientsReleaseSuccessfulControlConnections' "$EVIDENCE_DIR/negative-control.log"
       - name: Verify upstream socket lifecycle and package
         run: |
           set -euo pipefail
           git diff --exit-code -- lib/hypervisor/vz/client.go
           go test -race -count=10 -v -tags containers_image_openpgp \
             -run '^(TestRepeatedClientsReleaseSuccessfulControlConnections|TestControlConnectionsCloseAfterResponseErrors|TestControlConnectionClosesAfterCancellation)$' \
-            ./lib/hypervisor/vz | tee evidence/fixed.log
-          go test -race -count=1 -tags containers_image_openpgp ./lib/hypervisor/vz | tee evidence/vz-package.log
+            ./lib/hypervisor/vz | tee "$EVIDENCE_DIR/fixed.log"
+          go test -race -count=1 -tags containers_image_openpgp ./lib/hypervisor/vz | tee "$EVIDENCE_DIR/vz-package.log"
           go vet -tags containers_image_openpgp ./lib/hypervisor/vz ./cmd/vz-shim
           go test -tags containers_image_openpgp -run '^$' ./cmd/vz-shim
       - name: Build candidate without launching a server or VM
         run: |
           set -euo pipefail
           make build-darwin
+          go build -o bin/hypeman-token ./cmd/gen-jwt
           git diff --exit-code
-          go version -m bin/hypeman > evidence/build-info.txt
-          shasum -a 256 bin/hypeman > evidence/SHA256SUMS
+          test -z "$(git status --porcelain)"
+          go version -m bin/hypeman > "$EVIDENCE_DIR/build-info.txt"
+          grep -F "vcs.revision=$GITHUB_SHA" "$EVIDENCE_DIR/build-info.txt"
+          grep -F "vcs.modified=false" "$EVIDENCE_DIR/build-info.txt"
+          shasum -a 256 bin/hypeman bin/hypeman-token > "$EVIDENCE_DIR/SHA256SUMS"
           printf 'Source commit: %s\nUpstream revision: %s\nLocal delta: fork CI only; application source unchanged\nNot installed or deployed by this workflow.\n' \
-            "$GITHUB_SHA" "$UPSTREAM_REVISION" > evidence/provenance.txt
+            "$GITHUB_SHA" "$UPSTREAM_REVISION" > "$EVIDENCE_DIR/provenance.txt"
+      - name: Package source-pinned runtime for installation
+        run: |
+          set -euo pipefail
+          mkdir -p "$PACKAGE_DIR"
+          cp bin/hypeman "$PACKAGE_DIR/hypeman-api"
+          cp bin/hypeman-token "$PACKAGE_DIR/hypeman-token"
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path(os.environ["PACKAGE_DIR"])
+          info = {"schema": 1, "sourceRepository": "kernel/hypeman", "sourceRevision": os.environ["UPSTREAM_REVISION"], "buildRepository": os.environ["GITHUB_REPOSITORY"], "buildRevision": os.environ["GITHUB_SHA"], "buildRun": os.environ["GITHUB_RUN_ID"], "platform": "darwin_arm64", "files": {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in root.iterdir()}}
+          (root / "source-provenance.json").write_text(json.dumps(info, indent=2) + "\n")
+          PY
+          tar -czf "$ARCHIVE_PATH" -C "$PACKAGE_DIR" ./hypeman-api ./hypeman-token ./source-provenance.json
+          shasum -a 256 "$ARCHIVE_PATH" > "$EVIDENCE_DIR/archive-sha256.txt"
       - name: Upload verification evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: local-runtime-evidence
-          path: evidence/
+          path: ${{ env.EVIDENCE_DIR }}/
           retention-days: 14
       - name: Upload verified candidate
         uses: actions/upload-artifact@v4
         with:
           name: hypeman-latest-darwin-arm64
-          path: bin/hypeman
+          path: ${{ env.ARCHIVE_PATH }}
           retention-days: 14
